@@ -1,0 +1,158 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+
+Metadata:
+  AWS::ServerlessRepo::Application:
+    Name: waf-api
+    Description: App that deploys API with Web ACL
+    Author: olowosulu
+    SpdxLicenseId: Apache-2.0
+    LicenseUrl: LICENSE.txt
+    ReadmeUrl: README.md
+    Labels: ['waf','api','gateway']
+    HomePageUrl: https://github.com/olowosulu/sam-web-acl-api-gateway
+    SemanticVersion: 1.0.1
+    SourceCodeUrl: https://github.com/olowosulu/sam-web-acl-api-gateway
+
+Description: |
+  SAM Template with 
+  - API Gateway REST API
+  - Web ACLs
+  - CORS Enabled
+  - Inline Lambdas
+
+Globals:
+  Api:
+    Cors:
+      AllowHeaders: "'Content-Type,Authorization,x-amz-*'"
+      AllowMethods: "'DELETE,GET,HEAD,POST,PUT'"
+      AllowOrigin: "'*'"
+  Function:
+    AutoPublishAlias: live
+    Environment:
+      Variables:
+        APP: Repro
+    Handler: index.handler
+    Runtime: python3.8
+    Tags:
+      App: Repro
+      auto-delete: no
+      Stack: !Ref AWS::StackName
+    Timeout: 29
+
+Resources:
+  MTApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      EndpointConfiguration: REGIONAL
+      StageName: v1
+      Tags:
+        App: Repro
+
+  MTFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ['lambda.amazonaws.com']
+            Action: ['sts:AssumeRole']
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: CloudWatchLogPolicy
+                Effect: Allow
+                Action:
+                  - logs:PutLogEvents
+                  - logs:CreateLogStream
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+              - Sid: CloudWatchLogGroupPolicy
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                Resource: '*'
+
+  MTFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref MTApi
+            Path: /
+            Method: GET
+      InlineCode: |
+        import http.client as hc
+        import json
+        import os
+
+        def handler(event, context):
+          h4 = hc.HTTPConnection('ip.jsontest.com', 80, timeout=3)
+          h4.request('GET', '/')
+          ip = json.loads(h4.getresponse().read().decode())
+          resp = {'ip': ip['ip'], 'request_id': context.aws_request_id, 'region': os.environ['AWS_REGION']}
+          print(f'Response: {resp}')
+          print(f'Event: {event}')
+          return {
+            'statusCode': 200,
+            'body': json.dumps(resp)
+          }
+      Role: !GetAtt MTFunctionRole.Arn
+
+  MTWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties: 
+      DefaultAction: 
+        Allow: {}
+      Description: Some WebACL
+      Name: !Sub ${AWS::StackName}WAF
+      Rules:
+        - Name: RuleWithAWSManagedRules
+          Priority: 0
+          OverrideAction:
+            Count: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: RuleWithAWSManagedRulesMetric
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+              ExcludedRules: []
+        - Name: BlockXssAttack
+          Priority: 1
+          Action:
+            Block: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: BlockXssAttackMetric
+          Statement:
+            XssMatchStatement:
+              FieldToMatch:
+                AllQueryArguments: {}
+              TextTransformations:
+                - Priority: 1
+                  Type: NONE
+      Scope: REGIONAL
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub ${AWS::StackName}WAFMetric
+
+  MTWebACLAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      WebACLArn: !GetAtt MTWebACL.Arn
+      ResourceArn: !Sub arn:aws:apigateway:${AWS::Region}::/restapis/${MTApi}/stages/v1
+
+Outputs:
+  MTApi:
+    Description: API Gateway endpoint URL
+    Value: !Sub https://${MTApi}.execute-api.${AWS::Region}.amazonaws.com/v1/
